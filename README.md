@@ -16,7 +16,7 @@ Repositorio del post-contenido de la Unidad 6 de Patrones de Diseño de Software
 # Compilar el proyecto
 mvn compile
 
-# Ejecutar las pruebas automatizadas (5 casos de negocio)
+# Ejecutar las pruebas automatizadas (casos de negocio y promociones)
 mvn test
 
 # Iniciar la aplicación Spring Boot
@@ -69,32 +69,36 @@ El flujo de control dentro de `procesarPedido` es enredado, carece de cohesión 
 
 ---
 
-## Decisiones de diseño — Parte 1
+## Diagnóstico de Antipatrones — Parte 2: El Crecimiento del Sistema
 
-### Decisión 1: Validación como Chain of Responsibility
-- **Patrón Aplicado:** `Chain of Responsibility` mediante la clase abstracta `ValidadorPedido` y los eslabones concretos `ValidadorStock` y `ValidadorCliente`.
-- **Justificación:** Las validaciones de un pedido poseen una **dependencia real de orden y necesidad de corte anticipado (*fail-fast*)**: si no hay stock disponible, el pedido debe ser rechazado inmediatamente sin incurrir en el costo de consultar la base de datos para examinar el tipo y la mora del cliente.
-- **Alternativa Descartada:** Se evaluó utilizar una lista de predicados booleanos (`List<Predicate<ContextoPedido>>`). Dicha alternativa fue descartada porque un enfoque de predicados itera y evalúa todas las condiciones aunque la primera ya haya fallado, sin proporcionar un mecanismo limpio para abortar tempranamente el flujo de ejecución ni para transmitir un motivo de rechazo contextual enriquecido de manera desacoplada.
+### 3. Antipatrón: Golden Hammer (Martillo de Oro / Ley del Instrumento)
+Al incorporar las tres nuevas campañas de descuento solicitadas por mercadeo (`BLACK_FRIDAY`, `CORPORATIVO`, `VOLUMEN`), se incurrió en el antipatrón **Golden Hammer**: tomar una herramienta o patrón de diseño que funcionó exitosamente en una etapa anterior (`Chain of Responsibility`) y aplicarla a ciegas a un problema nuevo que tiene una naturaleza completamente distinta.
 
-### Decisión 2: Descuento como Strategy y no como parte de la cadena
-- **Patrón Aplicado:** `Strategy` a través de la interfaz `EstrategiaDescuento` con implementaciones concretas (`DescuentoVip`, `DescuentoFrecuente`, `DescuentoEstandar`) y un despachador `SelectorEstrategiaDescuento`.
-- **Justificación:** A diferencia de las validaciones, las reglas de descuento por tipo de cliente no tienen una relación secuencial de orden ni requieren cortar el flujo. Se aplica exactamente una estrategia basada en el tipo de cliente. Encapsular cada cálculo en su propia clase permite agregar nuevos tipos de cliente respetando el Principio Abierto/Cerrado (OCP) sin alterar código existente.
-- **Alternativa Descartada:** Se descartó modelar los descuentos como eslabones de la cadena de validación porque obligaría a forzar un mecanismo artificial para evitar que múltiples eslabones sobrescriban o compitan por el valor de descuento, agregando indirección y acoplamiento innecesario.
-
-### Decisión 3: Extracción de Persistencia y Notificación
-- **Solución:** Se extrajo `PedidoRepository` (anotado con `@Repository`) para encapsular las sentencias SQL JDBC y operaciones relacionales, y `NotificacionPedidoService` (anotado con `@Service`) para la construcción y envío del correo.
-- **Resultado:** `GestorPedidos` pasa de ser una clase de 340 líneas con 6 responsabilidades a un **orquestador delgado de 45 líneas** altamente legible y enfocado únicamente en coordinar las capas.
+#### Evidencia concreta en el código:
+1. **Ausencia total de dependencia de orden:** 
+   - En la cadena de validación genuina, `ValidadorStock` debe ejecutarse forzosamente antes que `ValidadorCliente` porque si no hay stock no tiene sentido consultar la mora. 
+   - En contraste, entre `PromocionBlackFriday`, `PromocionCorporativo` y `PromocionVolumen` **no existe ninguna dependencia de orden**: ejecutar `PromocionVolumen` antes que `PromocionCorporativo` produce exactamente el mismo resultado.
+2. **Ausencia de corte anticipado (*fail-fast*):**
+   - El contrato semántico fundamental de `ValidadorPedido` es decidir si el pedido continúa o se rechaza (`contexto.rechazar(...)`).
+   - Sin embargo, las tres clases de promoción **nunca rechazan un pedido**. Su única acción es mutar un campo compartido (`contexto.aplicarDescuentoCampana(...)`).
+3. **Contaminación del Contexto con Estado Mutable Compartido:**
+   - Para encajar las promociones a la fuerza en la cadena, se tuvo que ensuciar `ContextoPedido` agregándole `descuentoCampana` y un método mutable `aplicarDescuentoCampana(double valor)` con lógica implícita de negocio (`if (valor > this.descuentoCampana) ...`).
+   - Si mañana se requiere sumar descuentos en vez de calcular el máximo, o si una campaña anula a otra, la cadena se vuelve ambigua e inmanejable.
+4. **Motivación del error:** Se eligió `Chain of Responsibility` no porque fuera la solución técnicamente idónea, sino simplemente porque *"los eslabones ya sabían cómo conectarse entre sí"* y *"ya funcionó en la Parte 1"*.
 
 ---
 
-## Verificación de Comportamiento Observable
+## Decisiones de diseño — Parte 1 y Parte 2
 
-Los cinco casos de prueba de negocio producen **exactamente la misma salida y totales** antes y después de la refactorización:
+### Parte 1: Chain of Responsibility y Strategy
+- **Chain of Responsibility (`ValidadorPedido`):** Reservado estrictamente para los eslabones que poseen dependencia causal de orden y corte anticipado (`ValidadorStock` y `ValidadorCliente`).
+- **Strategy (`EstrategiaDescuento`):** Encapsula el cálculo de descuento por tipo de cliente (`VIP`, `FRECUENTE`, `ESTANDAR`) sin acoplamiento de orden ni ramificaciones `if/else`.
+- **Alternativa Descartada:** Predicados booleanos en lista (evalúan todo sin corte anticipado).
 
-| Caso de Prueba | Entrada | Salida Observable (Antes y Después) |
-|---|---|---|
-| **1. Stock Insuficiente** | Producto 101, Cantidad 99 | Rechazado: `"Stock insuficiente: producto 101"` |
-| **2. Cliente Inexistente** | Cliente 9999, Cantidad 1 | Rechazado: `"Cliente no registrado"` |
-| **3. Cliente Moroso** | Cliente 4, Deuda $150.000 (< 20:00) | Rechazado: `"Cliente con deuda pendiente: $150000.0"` |
-| **4. Cliente VIP (> 1M)** | Cliente 1, Subtotal $1.200.000 | Confirmado: Descuento 15%, Total `$1.213.800.0` |
-| **5. Cliente Frecuente** | Cliente 2, 5 pedidos previos, Subtotal $400.000 | Confirmado: Descuento 4%, Total `$456.960.0` |
+### Parte 2: Extensión de Strategy y Erradicación de Golden Hammer
+- **Patrón Aplicado:** Se migran las 3 campañas de descuento al patrón **Strategy**, implementando `EstrategiaDescuento` en:
+  - `DescuentoBlackFriday` (25% fijo si la propiedad está activa).
+  - `DescuentoCorporativo` (10% si el cliente posee NIT registrado).
+  - `DescuentoVolumen` (12% si la cantidad total supera 20 unidades).
+- **CalculadorDescuentoFinal:** Clase cohesiva que inyecta el `SelectorEstrategiaDescuento` y la lista de campañas promocionales, computando limpiamente el mayor descuento sin campos mutables en el contexto ni cadenas artificiales.
+- **Prevención de Lava Flow:** Se eliminaron por completo las clases `PromocionBlackFriday`, `PromocionCorporativo` y `PromocionVolumen`, así como el campo `descuentoCampana` de `ContextoPedido`. Dejarlas comentadas en el código fuente habría creado código muerto (*Lava Flow*); su histórico se preserva adecuadamente en los commits de Git.
