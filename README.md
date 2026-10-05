@@ -5,6 +5,31 @@ Repositorio del post-contenido de la Unidad 6 de Patrones de Diseño de Software
 
 ---
 
+## Cómo ejecutar
+
+### Prerrequisitos
+- Java 17 o superior (`java -version`)
+- Maven 3.8+ (`mvn -version`)
+
+### Comandos de ejecución
+```bash
+# Compilar el proyecto
+mvn compile
+
+# Ejecutar las pruebas automatizadas (5 casos de negocio)
+mvn test
+
+# Iniciar la aplicación Spring Boot
+mvn spring-boot:run
+```
+
+- Consola H2: `http://localhost:8080/h2-console`
+  - **JDBC URL:** `jdbc:h2:mem:pedidos_db`
+  - **Usuario:** `sa`
+  - **Contraseña:** *(vacía)*
+
+---
+
 ## Diagnóstico de Antipatrones — Parte 1: GestorPedidos
 
 ### 1. Antipatrón: God Object (Clase Dios / Blob)
@@ -44,14 +69,32 @@ El flujo de control dentro de `procesarPedido` es enredado, carece de cohesión 
 
 ---
 
-## Plan de Refactorización
+## Decisiones de diseño — Parte 1
 
-Para eliminar el God Object y el Spaghetti Code, se desacoplará el método `procesarPedido` en componentes altamente cohesivos y débilmente acoplados:
+### Decisión 1: Validación como Chain of Responsibility
+- **Patrón Aplicado:** `Chain of Responsibility` mediante la clase abstracta `ValidadorPedido` y los eslabones concretos `ValidadorStock` y `ValidadorCliente`.
+- **Justificación:** Las validaciones de un pedido poseen una **dependencia real de orden y necesidad de corte anticipado (*fail-fast*)**: si no hay stock disponible, el pedido debe ser rechazado inmediatamente sin incurrir en el costo de consultar la base de datos para examinar el tipo y la mora del cliente.
+- **Alternativa Descartada:** Se evaluó utilizar una lista de predicados booleanos (`List<Predicate<ContextoPedido>>`). Dicha alternativa fue descartada porque un enfoque de predicados itera y evalúa todas las condiciones aunque la primera ya haya fallado, sin proporcionar un mecanismo limpio para abortar tempranamente el flujo de ejecución ni para transmitir un motivo de rechazo contextual enriquecido de manera desacoplada.
 
-| Responsabilidad Extraída | Patrón / Solución Arquitectónica | Justificación |
+### Decisión 2: Descuento como Strategy y no como parte de la cadena
+- **Patrón Aplicado:** `Strategy` a través de la interfaz `EstrategiaDescuento` con implementaciones concretas (`DescuentoVip`, `DescuentoFrecuente`, `DescuentoEstandar`) y un despachador `SelectorEstrategiaDescuento`.
+- **Justificación:** A diferencia de las validaciones, las reglas de descuento por tipo de cliente no tienen una relación secuencial de orden ni requieren cortar el flujo. Se aplica exactamente una estrategia basada en el tipo de cliente. Encapsular cada cálculo en su propia clase permite agregar nuevos tipos de cliente respetando el Principio Abierto/Cerrado (OCP) sin alterar código existente.
+- **Alternativa Descartada:** Se descartó modelar los descuentos como eslabones de la cadena de validación porque obligaría a forzar un mecanismo artificial para evitar que múltiples eslabones sobrescriban o compitan por el valor de descuento, agregando indirección y acoplamiento innecesario.
+
+### Decisión 3: Extracción de Persistencia y Notificación
+- **Solución:** Se extrajo `PedidoRepository` (anotado con `@Repository`) para encapsular las sentencias SQL JDBC y operaciones relacionales, y `NotificacionPedidoService` (anotado con `@Service`) para la construcción y envío del correo.
+- **Resultado:** `GestorPedidos` pasa de ser una clase de 340 líneas con 6 responsabilidades a un **orquestador delgado de 45 líneas** altamente legible y enfocado únicamente en coordinar las capas.
+
+---
+
+## Verificación de Comportamiento Observable
+
+Los cinco casos de prueba de negocio producen **exactamente la misma salida y totales** antes y después de la refactorización:
+
+| Caso de Prueba | Entrada | Salida Observable (Antes y Después) |
 |---|---|---|
-| **Secuencia de Validaciones (Stock, Cliente, Mora)** | **Chain of Responsibility** (`ValidadorPedido`) | Permite encadenamiento ordenado con **corte anticipado** (*fail-fast*): si el stock es insuficiente, se aborta inmediatamente sin consultar innecesariamente la mora del cliente en base de datos. |
-| **Cálculo de Descuentos por Tipo de Cliente** | **Strategy** (`EstrategiaDescuento`) | Cada tipo de cliente (`VIP`, `FRECUENTE`, `ESTANDAR`) encapsula su propio algoritmo sin jerarquía de orden, seleccionado mediante un mapa directo (`SelectorEstrategiaDescuento`), cumpliendo OCP. |
-| **Persistencia a Base de Datos** | **Repository Pattern** (`PedidoRepository`) | Encapsula las operaciones JDBC y sentencias SQL, aislando la lógica de negocio de la infraestructura relacional. |
-| **Generación de Notificaciones** | **Dedicated Service** (`NotificacionPedidoService`) | Separa el ensamblado del mensaje de correo de la lógica transaccional de compras. |
-| **Orquestación del Flujo** | **Orquestador Delgado** (`GestorPedidos`) | Coordina las capas en menos de 30 líneas sin conocer los detalles de implementación interna. |
+| **1. Stock Insuficiente** | Producto 101, Cantidad 99 | Rechazado: `"Stock insuficiente: producto 101"` |
+| **2. Cliente Inexistente** | Cliente 9999, Cantidad 1 | Rechazado: `"Cliente no registrado"` |
+| **3. Cliente Moroso** | Cliente 4, Deuda $150.000 (< 20:00) | Rechazado: `"Cliente con deuda pendiente: $150000.0"` |
+| **4. Cliente VIP (> 1M)** | Cliente 1, Subtotal $1.200.000 | Confirmado: Descuento 15%, Total `$1.213.800.0` |
+| **5. Cliente Frecuente** | Cliente 2, 5 pedidos previos, Subtotal $400.000 | Confirmado: Descuento 4%, Total `$456.960.0` |
